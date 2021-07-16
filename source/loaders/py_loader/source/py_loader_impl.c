@@ -41,7 +41,7 @@
 
 #define PY_LOADER_IMPL_FUNCTION_TYPE_INVOKE_FUNC "__py_loader_impl_function_type_invoke__"
 
-#define EXPERIMENTAL_ASYNC_ENABLED 0
+#define EXPERIMENTAL_ASYNC_ENABLED 1
 
 #if (!defined(NDEBUG) || defined(DEBUG) || defined(_DEBUG) || defined(__DEBUG) || defined(__DEBUG__))
 	#define DEBUG_ENABLED 1
@@ -140,8 +140,10 @@ struct loader_impl_py_type
 	PyObject *asyncio_wrap_future;
 	PyObject *asyncio_loop;
 
-	PyObject *py_task_callback_handler;
 	PyObject *threading_module;
+	PyObject *asyncio_thread;	
+
+	PyObject *py_task_callback_handler;
 	/* End asyncio required modules */
 
 #if DEBUG_ENABLED
@@ -1517,18 +1519,7 @@ function_return function_py_interface_await(function func, function_impl impl, f
 	{
 		value v = NULL;
 
-		type_id id = TYPE_INVALID;
-
-		if (ret_type == NULL)
-		{
-			id = py_loader_impl_capi_to_value_type((loader_impl)py_impl, pyfuture);
-		}
-		else
-		{
-			id = type_index(ret_type);
-		}
-
-		v = py_loader_impl_capi_to_value(py_func->impl, pyfuture, id);
+		v = py_loader_impl_capi_to_value(py_func->impl, pyfuture, METACALL_FUTURE);
 
 		Py_DECREF(pyfuture);
 
@@ -1813,12 +1804,12 @@ PyObject *py_background_thread_create_event_loop(PyObject *self, PyObject *py_im
 
 	PyObject *run_forever_str = PyUnicode_FromString("run_forever");
 	PyObject_CallMethodObjArgs(py_impl->asyncio_loop, run_forever_str, NULL);
+	Py_DECREF(run_forever_str);
 	if (PyErr_Occurred() != NULL)
 	{
 		py_loader_impl_error_print(py_impl);
+		Py_RETURN_NONE;
 	}
-
-	Py_DECREF(run_forever_str);
 
 	Py_RETURN_NONE;
 }
@@ -1884,6 +1875,12 @@ int py_loader_impl_initialize_asyncio_module(loader_impl impl, loader_impl_py py
 		"MetaCall async invoke callback"
 	};
 	py_impl->py_task_callback_handler = PyCFunction_NewEx(&py_task_callback_handler_def, NULL, NULL);
+	if (PyErr_Occurred() != NULL || py_impl->py_task_callback_handler == NULL)
+	{
+		log_write("metacall", LOG_LEVEL_ERROR, "Error creating py_task_callback_handler");
+		py_loader_impl_error_print(py_impl);
+		goto error_after_asyncio_wrap_future;
+	}
 
 	PyObject *new_event_loop_func = PyObject_GetAttrString(py_impl->asyncio_module, "new_event_loop");
 
@@ -1921,7 +1918,7 @@ int py_loader_impl_initialize_asyncio_module(loader_impl impl, loader_impl_py py
 	PyDict_SetItemString(kargs, "name", thread_name_str);
 	PyDict_SetItemString(kargs, "args", customFuncArgsTuple);
 
-	PyObject *thread = PyObject_Call(thread_object, emptyArgs, kargs);
+	py_impl->asyncio_thread = PyObject_Call(thread_object, emptyArgs, kargs);
 	if (PyErr_Occurred() != NULL)
 	{
 		py_loader_impl_error_print(py_impl);
@@ -1929,7 +1926,7 @@ int py_loader_impl_initialize_asyncio_module(loader_impl impl, loader_impl_py py
 	}
 
 	PyObject *start_thread_str = PyUnicode_FromString("start");
-	PyObject_CallMethodObjArgs(thread, start_thread_str, NULL);
+	PyObject_CallMethodObjArgs(py_impl->asyncio_thread, start_thread_str, NULL);
 	Py_DECREF(start_thread_str);
 
 	Py_DECREF(py_impl_capsule);
@@ -2299,6 +2296,7 @@ loader_impl_data py_loader_impl_initialize(loader_impl impl, configuration confi
 	py_impl->asyncio_run_coroutine_threadsafe = NULL;
 	py_impl->asyncio_wrap_future = NULL;
 	py_impl->asyncio_loop = NULL;
+	py_impl->asyncio_thread = NULL;
 	py_impl->py_task_callback_handler = NULL;
 	py_impl->threading_module = NULL;
 #endif
@@ -3343,6 +3341,29 @@ int py_loader_impl_destroy(loader_impl impl)
 		return 1;
 	}
 
+	/* Stop asyncio event loop */
+	PyObject *stop_method = PyObject_GetAttrString(py_impl->asyncio_loop, "stop");
+	if (stop_method == NULL)
+	{
+		log_write("metacall", LOG_LEVEL_ERROR, "Error getting stop_method");
+	}
+	PyObject *stop_str = PyUnicode_FromString("call_soon_threadsafe");
+	PyObject *stop_result = PyObject_CallMethodObjArgs(py_impl->asyncio_loop, stop_str, stop_method, NULL);
+	Py_DECREF(stop_str);
+	if (PyErr_Occurred() != NULL || stop_result == NULL)
+	{
+		py_loader_impl_error_print(py_impl);
+	}
+	Py_DECREF(stop_method);
+
+	PyObject *join_str = PyUnicode_FromString("join");
+	PyObject *join_result = PyObject_CallMethodObjArgs(py_impl->asyncio_thread, join_str, NULL);
+	Py_DECREF(join_str);
+	if (PyErr_Occurred() != NULL || join_result == NULL)
+	{
+		py_loader_impl_error_print(py_impl);
+	}
+
 	/* Destroy children loaders */
 	loader_unload_children(impl);
 
@@ -3360,6 +3381,7 @@ int py_loader_impl_destroy(loader_impl impl)
 	Py_XDECREF(py_impl->asyncio_run_coroutine_threadsafe);
 	Py_XDECREF(py_impl->asyncio_wrap_future);
 	Py_XDECREF(py_impl->asyncio_loop);
+	Py_XDECREF(py_impl->asyncio_thread);
 	Py_XDECREF(py_impl->py_task_callback_handler);
 	Py_XDECREF(py_impl->threading_module);
 

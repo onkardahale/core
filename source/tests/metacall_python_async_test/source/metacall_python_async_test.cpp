@@ -38,8 +38,6 @@ TEST_F(metacall_python_async_test, DefaultConstructor)
 
 	ASSERT_EQ((int)0, (int)metacall_initialize());
 
-	// Disable the test until EXPERIMENTAL_ASYNC_ENABLED is removed
-	return;
 
 /* Python */
 #if defined(OPTION_BUILD_LOADERS_PY)
